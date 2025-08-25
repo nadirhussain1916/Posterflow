@@ -1,4 +1,3 @@
-
 import os
 import io
 import base64
@@ -9,6 +8,14 @@ import streamlit as st
 import logging
 from dotenv import load_dotenv
 from PIL import Image
+
+# Import Google Drive functionality
+try:
+    from google_drive import display_gdrive_upload_ui
+    GDRIVE_AVAILABLE = True
+except ImportError as e:
+    logging.warning(f"Google Drive functionality not available: {e}")
+    GDRIVE_AVAILABLE = False
 
 # ========== CONFIG ==========
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
@@ -108,13 +115,16 @@ if prompt_btn:
         logging.warning("No OpenAI API key provided.")
         st.error("Please add your OpenAI API key in the sidebar.")
     else:
+        logging.info("Generating prompts with OpenAI ChatGPT.")
         try:
             from openai import OpenAI
             client = OpenAI(api_key=OPENAI_API_KEY)
-            system = ("You generate concise, vivid image prompts for AI artwork. "
-                      "Keep each under 100 words. Include subject, mood, composition, colour palette, and style cues. "
-                      "Avoid naming living artists.")
-            user = f"Concept: {concept}\nStyle: {style}\nKeywords: {keywords}\nCreate {n_prompts} different prompts."
+            system = ("You are an expert at creating detailed image prompts for AI art generation. "
+                      "Create exactly the requested number of distinct, creative prompts. "
+                      "Each prompt should be 50-100 words and include: subject, mood, composition, colors, and artistic style. "
+                      "Format your response as a numbered list (1., 2., 3., etc.). "
+                      "Each prompt should be complete and vivid. Avoid naming living artists.")
+            user = f"Create exactly {n_prompts} detailed image prompts based on:\n\nConcept: {concept}\nStyle: {style}\nKeywords: {keywords}\n\nFormat as a numbered list (1., 2., 3., etc.). Each prompt should be detailed and complete."
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role":"system","content":system},{"role":"user","content":user}],
@@ -122,27 +132,60 @@ if prompt_btn:
             )
             if resp and resp.choices and resp.choices[0].message and resp.choices[0].message.content:
                 text = resp.choices[0].message.content.strip()
-                prompts = [p.strip("-• ").strip() for p in text.split("\n") if p.strip()]
-                if len(prompts) < n_prompts:
-                    prompts = [p.strip() for p in text.split("\n\n") if p.strip()]
-                st.session_state["prompts"] = prompts[:n_prompts]
-                st.success("Prompts generated.")
-                logging.info(f"Prompts generated: {prompts[:n_prompts]}")
+                logging.info(f"Raw ChatGPT response: {text}")
+                
+                # Parse prompts with multiple strategies
+                prompts = []
+                
+                # Strategy 1: Split by numbered lines (1., 2., 3., etc.)
+                import re
+                numbered_prompts = re.findall(r'\d+\.\s*(.+?)(?=\d+\.|$)', text, re.DOTALL)
+                if numbered_prompts and len(numbered_prompts) >= n_prompts:
+                    prompts = [p.strip() for p in numbered_prompts]
+                
+                # Strategy 2: Split by bullet points (-, •, *, etc.)
+                if not prompts:
+                    bullet_prompts = re.findall(r'[-•*]\s*(.+?)(?=[-•*]|$)', text, re.DOTALL)
+                    if bullet_prompts and len(bullet_prompts) >= n_prompts:
+                        prompts = [p.strip() for p in bullet_prompts]
+                
+                # Strategy 3: Split by double newlines
+                if not prompts:
+                    paragraph_prompts = [p.strip() for p in text.split("\n\n") if p.strip()]
+                    if len(paragraph_prompts) >= n_prompts:
+                        prompts = paragraph_prompts
+                
+                # Strategy 4: Split by single newlines and clean
+                if not prompts:
+                    line_prompts = [p.strip("-• *").strip() for p in text.split("\n") if p.strip() and len(p.strip()) > 20]
+                    prompts = line_prompts
+                
+                # Ensure we have the right number of prompts
+                if len(prompts) >= n_prompts:
+                    prompts = prompts[:n_prompts]
+                    st.session_state["prompts"] = prompts
+                    st.success(f"Generated {len(prompts)} prompts.")
+                    logging.info(f"Successfully parsed {len(prompts)} prompts: {prompts}")
+                else:
+                    # Fallback: use the raw text as a single prompt if parsing fails
+                    st.session_state["prompts"] = [text]
+                    st.warning(f"Could only parse {len(prompts)} prompts. Using full response as a single prompt.")
+                    logging.warning(f"Prompt parsing incomplete. Generated {len(prompts)} prompts, expected {n_prompts}")
             else:
                 st.error("No response from OpenAI.")
                 logging.error("No response from OpenAI.")
         except Exception as e:
             st.error(f"OpenAI error: {e}")
+            logging.error(f"OpenAI error: {e}")
 
 if "prompts" in st.session_state:
+    logging.info("Prompts available. Displaying options.")
     st.subheader("Prompt options")
     for i, p in enumerate(st.session_state["prompts"], 1):
         st.markdown(f"**{i}.** {p}")
     chosen_idx = st.number_input("Pick a prompt", 1, len(st.session_state["prompts"]), 1)
     chosen_prompt = st.session_state["prompts"][chosen_idx-1]
 else:
-    logging.info("Generating prompts with OpenAI ChatGPT.")
-    logging.info("Prompts available. Displaying options.")
     chosen_prompt = None
 
 # ---------- 2) Generate images ----------
@@ -164,22 +207,46 @@ if gen_btn:
             from openai import OpenAI
             client = OpenAI(api_key=OPENAI_API_KEY)
             logging.info(f"Requesting {num_images} images from OpenAI DALL·E with prompt: {chosen_prompt}")
-            resp = client.images.generate(
-                model="dall-e-3",
-                prompt=chosen_prompt,
-                n=num_images,
-                size="1024x1024",
-                response_format="b64_json"
-            )
+            
             images = []
-            if resp and resp.data:
-                for i, d in enumerate(resp.data):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Generate images one by one since DALL-E 3 only supports n=1
+            for i in range(num_images):
+                status_text.text(f"Generating image {i+1}/{num_images}...")
+                progress_bar.progress((i) / num_images)
+                
+                resp = client.images.generate(
+                    model="dall-e-3",
+                    prompt=chosen_prompt if chosen_prompt else "",
+                    n=1,  # DALL-E 3 only supports n=1
+                    size="1024x1024",
+                    response_format="b64_json"
+                )
+                
+                if resp and resp.data and resp.data[0]:
+                    d = resp.data[0]
                     if d and hasattr(d, 'b64_json') and d.b64_json:
                         raw = base64.b64decode(d.b64_json)
                         images.append({"name": f"gen_{i+1}.png", "bytes": raw})
+                        logging.info(f"Successfully generated image {i+1}/{num_images}")
+                else:
+                    logging.error(f"Failed to generate image {i+1}/{num_images}")
+                    st.warning(f"Failed to generate image {i+1}")
+            
+            # Complete progress
+            progress_bar.progress(1.0)
+            status_text.text(f"Generated {len(images)} images successfully!")
+            
             st.session_state["images"] = images
             logging.info(f"Generated {len(images)} image(s) and stored in session state.")
             st.success(f"Generated {len(images)} image(s).")
+            
+            # Clean up progress indicators
+            progress_bar.empty()
+            status_text.empty()
+            
         except Exception as e:
             logging.error(f"OpenAI image error: {e}")
             st.error(f"OpenAI image error: {e}")
@@ -195,6 +262,15 @@ if "images" in st.session_state:
         c.image(item["bytes"], caption=item["name"])
         if c.checkbox(f"Select {item['name']}", key=f"sel_{i}"):
             selected.append(i)
+    
+    # Google Drive Upload Section
+    if GDRIVE_ENABLED and GDRIVE_AVAILABLE:
+        st.markdown("---")
+        logging.info("Displaying Google Drive upload UI.")
+        display_gdrive_upload_ui(st.session_state["images"])
+    elif GDRIVE_ENABLED and not GDRIVE_AVAILABLE:
+        st.markdown("---")
+        st.error("Google Drive functionality is not available. Please install required packages: `pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib`")
 
 # ---------- 4) Export A3/A4/A5 ----------
 st.header("4) Export print files (300 DPI)")

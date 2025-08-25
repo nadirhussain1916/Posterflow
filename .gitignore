@@ -1,2 +1,20 @@
+# Python virtual environment
 venv/
+
+# Environment variables
 .env
+
+# Google Drive credentials
+google_drive.json
+
+# Streamlit and Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# VS Code settings
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
