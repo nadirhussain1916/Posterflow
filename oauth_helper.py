@@ -169,17 +169,47 @@ def callback():
         logging.info(f"OAuth successful for user: {id_info['email']}")
         
         return f"""
-        <h2>✅ Authentication Successful!</h2>
-        <p>Welcome, {id_info.get('name', id_info['email'])}!</p>
-        <p>Your tokens have been saved. You can now return to your Streamlit app and upload images to Google Drive.</p>
-        <p><strong>Next steps:</strong></p>
-        <ol>
-            <li>Go back to your Streamlit app</li>
-            <li>Refresh the page</li>
-            <li>You should now see your authenticated status</li>
-            <li>Select images and upload to Google Drive</li>
-        </ol>
-        <p><a href="http://localhost:8501" target="_blank">Return to Streamlit App</a></p>
+        <html>
+        <head>
+            <title>Authentication Successful</title>
+            <meta http-equiv="refresh" content="3;url=http://localhost:8501">
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }}
+                .container {{ background: rgba(255, 255, 255, 0.1); padding: 30px; border-radius: 15px; box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37); backdrop-filter: blur(4px); border: 1px solid rgba(255, 255, 255, 0.18); }}
+                .success {{ color: #4CAF50; font-size: 24px; margin-bottom: 20px; }}
+                .countdown {{ color: #f0f0f0; font-size: 16px; margin: 20px 0; }}
+                .spinner {{ border: 4px solid rgba(255, 255, 255, 0.3); border-top: 4px solid #4CAF50; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }}
+                @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+                .link {{ color: #90CAF9; text-decoration: none; }}
+                .link:hover {{ color: #BBDEFB; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="success">✅ Authentication Successful!</div>
+                <h3>Welcome, <strong>{id_info.get('name', id_info['email'])}</strong>!</h3>
+                <p>Your Google Drive access has been configured successfully.</p>
+                <p>You can now save your generated images directly to Google Drive!</p>
+                
+                <div class="spinner"></div>
+                <p class="countdown">Redirecting to Streamlit app in <span id="countdown">3</span> seconds...</p>
+                <p><a href="http://localhost:8501" class="link">Click here if not redirected automatically</a></p>
+                <button onclick="window.close()" style="margin-top: 10px; padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">Close This Window</button>
+            </div>
+            
+            <script>
+                var timeLeft = 3;
+                var timer = setInterval(function() {{
+                    timeLeft--;
+                    document.getElementById('countdown').textContent = timeLeft;
+                    if (timeLeft <= 0) {{
+                        clearInterval(timer);
+                        window.location.href = 'http://localhost:8501';
+                    }}
+                }}, 1000);
+            </script>
+        </body>
+        </html>
         """
         
     except Exception as e:

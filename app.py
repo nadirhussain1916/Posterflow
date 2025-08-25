@@ -86,13 +86,43 @@ st.sidebar.subheader("Optional Features")
 GDRIVE_ENABLED = st.sidebar.checkbox("Enable Google Drive upload", value=True)
 TTS_ENABLED = st.sidebar.checkbox("Enable TikTok Shop upload", value=False)
 
+if GDRIVE_ENABLED and GDRIVE_AVAILABLE:
+    from google_drive import get_authenticated_user, check_oauth_helper_status
+    
+    # Google Drive Authentication Section
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔗 Google Drive Authentication")
+    
+    # Check OAuth helper status
+    oauth_helper_running = check_oauth_helper_status()
+    user_email = get_authenticated_user()
+    
+    if not oauth_helper_running:
+        st.sidebar.error("⚠️ OAuth Helper not running")
+        st.sidebar.caption("Run: python oauth_helper.py")
+    else:
+        if user_email:
+            st.sidebar.success(f"✅ Authenticated as: {user_email.split('@')[0]}")
+            if st.sidebar.button("🔄 Logout"):
+                # Clear user from database
+                import sqlite3
+                conn = sqlite3.connect("users.db")
+                c = conn.cursor()
+                c.execute("DELETE FROM users WHERE email=?", (user_email,))
+                conn.commit()
+                conn.close()
+                st.rerun()
+        else:
+            st.sidebar.info("🔐 Not authenticated")
+            if st.sidebar.button("🔐 Google Auth", type="primary"):
+                # Open authentication in new tab
+                st.sidebar.markdown("Click the link below to authenticate:")
+                st.sidebar.markdown("🔗 **[Authenticate with Google](http://127.0.0.1:5001/start_oauth)**")
+                st.sidebar.info("After authentication, refresh this page.")
+
 if GDRIVE_ENABLED and not GDRIVE_AVAILABLE:
     st.sidebar.error("Google Drive requires: google-api-python-client, google-auth-httplib2, google-auth-oauthlib")
     st.sidebar.caption("Run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib")
-
-if GDRIVE_ENABLED and GDRIVE_AVAILABLE:
-    st.sidebar.success("✅ Google Drive ready")
-    st.sidebar.caption("Make sure client_secret.json is in the app directory")
 
 if TTS_ENABLED:
     TTS_BASE_URL = st.sidebar.text_input("TikTok Base URL", value=os.getenv("TTS_BASE_URL","https://open-api.tiktokglobalshop.com"))
@@ -262,7 +292,7 @@ if gen_btn:
             logging.error(f"OpenAI image error: {e}")
             st.error(f"OpenAI image error: {e}")
 
-# ---------- 3) Pick best ----------
+# ---------- 3) Pick best and Save to Google Drive ----------
 selected = []
 if "images" in st.session_state:
     logging.info("Images available. Displaying selection UI.")
@@ -274,11 +304,51 @@ if "images" in st.session_state:
         if c.checkbox(f"Select {item['name']}", key=f"sel_{i}"):
             selected.append(i)
     
-    # Google Drive Upload Section
-    if GDRIVE_ENABLED and GDRIVE_AVAILABLE:
+    # Quick Google Drive Save Section
+    if GDRIVE_ENABLED and GDRIVE_AVAILABLE and selected:
+        from google_drive import get_authenticated_user, upload_image_to_drive
+        user_email = get_authenticated_user()
+        
         st.markdown("---")
-        logging.info("Displaying Google Drive upload UI.")
-        display_gdrive_upload_ui(st.session_state["images"])
+        st.subheader("💾 Save to Google Drive")
+        
+        if user_email:
+            st.success(f"✅ Authenticated as: {user_email}")
+            if st.button("📤 Save Selected Images to Google Drive", type="primary"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                success_count = 0
+                for i, idx in enumerate(selected):
+                    item = st.session_state["images"][idx]
+                    status_text.text(f"Uploading {item['name']}...")
+                    progress_bar.progress((i) / len(selected))
+                    
+                    result = upload_image_to_drive(item["bytes"], item["name"], user_email)
+                    
+                    if result["success"]:
+                        success_count += 1
+                        st.success(f"✅ {item['name']} uploaded successfully!")
+                    else:
+                        st.error(f"❌ Failed to upload {item['name']}: {result['error']}")
+                
+                progress_bar.progress(1.0)
+                status_text.text(f"Upload complete! {success_count}/{len(selected)} images saved.")
+                
+                # Clean up progress indicators
+                import time
+                time.sleep(2)
+                progress_bar.empty()
+                status_text.empty()
+        else:
+            st.warning("🔐 Please authenticate with Google first using the sidebar button.")
+            st.info("👈 Click 'Google Auth' in the sidebar to get started.")
+    
+    # Advanced Google Drive Upload Section (keep the existing detailed UI)
+    if GDRIVE_ENABLED and GDRIVE_AVAILABLE:
+        with st.expander("🔧 Advanced Google Drive Options"):
+            logging.info("Displaying advanced Google Drive upload UI.")
+            display_gdrive_upload_ui(st.session_state["images"])
     elif GDRIVE_ENABLED and not GDRIVE_AVAILABLE:
         st.markdown("---")
         st.error("Google Drive functionality is not available. Please install required packages: `pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib`")

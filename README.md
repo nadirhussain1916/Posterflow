@@ -21,10 +21,8 @@ Generate AI images using DALL-E and automatically upload them to Google Drive.
    - Go to [Google Cloud Console](https://console.cloud.google.com/)
    - Create a new project or select existing one
    - Enable Google Drive API
-   - Create OAuth 2.0 credentials (Web application type)
-   - Set authorized redirect URI to: `http://127.0.0.1:5001/callback`
+   - Create OAuth 2.0 credentials
    - Download the JSON file and save as `client_secret.json` in this directory
-   - **Important**: Use `client_secret.json.template` as a reference for the file structure
 
 3. **Set OpenAI API Key**
    - Get your API key from [OpenAI](https://platform.openai.com/api-keys)
