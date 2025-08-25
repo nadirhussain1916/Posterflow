@@ -6,7 +6,7 @@ venv/
 
 # Google Drive credentials
 google_drive.json
-
+client_secret.json
 # Streamlit and Python cache
 __pycache__/
 *.pyc
