@@ -21,21 +21,71 @@ from flask import Flask, request, redirect, jsonify
 from google_auth_oauthlib.flow import Flow
 import google.auth.transport.requests
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
 app = Flask(__name__)
-app.secret_key = "oauth_helper_secret"
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "oauth_helper_secret")
 
 # Force OAuthlib to allow http:// for local dev
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
-GOOGLE_CLIENT_ID = "761667959165-08q7o0phqtb66uf7v2mk8sk7n6vuaet4.apps.googleusercontent.com"
+# Load Google OAuth configuration from client_secret.json and environment
+def load_google_config():
+    """Load Google OAuth configuration from client_secret.json and environment variables"""
+    client_secrets_file = os.path.join(pathlib.Path(__file__).parent, "client_secret.json")
+    
+    # Default values
+    config = {
+        "client_id": None,
+        "client_secret": None,
+        "oauth_host": os.getenv("OAUTH_HELPER_HOST", "127.0.0.1"),
+        "oauth_port": int(os.getenv("OAUTH_HELPER_PORT", "5001")),
+        "streamlit_host": os.getenv("STREAMLIT_HOST", "127.0.0.1"),
+        "streamlit_port": int(os.getenv("STREAMLIT_PORT", "8501")),
+        "database_path": os.getenv("DATABASE_PATH", "users.db")
+    }
+    
+    # Load from client_secret.json if available
+    if os.path.exists(client_secrets_file):
+        try:
+            with open(client_secrets_file) as f:
+                client_secrets = json.load(f)
+                if "web" in client_secrets:
+                    config["client_id"] = client_secrets["web"].get("client_id")
+                    config["client_secret"] = client_secrets["web"].get("client_secret")
+                elif "installed" in client_secrets:
+                    config["client_id"] = client_secrets["installed"].get("client_id")
+                    config["client_secret"] = client_secrets["installed"].get("client_secret")
+        except Exception as e:
+            logging.error(f"Error loading client_secret.json: {e}")
+    
+    # Override with environment variables if set
+    if os.getenv("GOOGLE_CLIENT_ID"):
+        config["client_id"] = os.getenv("GOOGLE_CLIENT_ID")
+    if os.getenv("GOOGLE_CLIENT_SECRET"):
+        config["client_secret"] = os.getenv("GOOGLE_CLIENT_SECRET")
+    
+    return config
+
+# Load configuration
+GOOGLE_CONFIG = load_google_config()
+GOOGLE_CLIENT_ID = GOOGLE_CONFIG["client_id"]
+GOOGLE_CLIENT_SECRET = GOOGLE_CONFIG["client_secret"]
+OAUTH_HELPER_HOST = GOOGLE_CONFIG["oauth_host"]
+OAUTH_HELPER_PORT = GOOGLE_CONFIG["oauth_port"]
+STREAMLIT_HOST = GOOGLE_CONFIG["streamlit_host"]
+STREAMLIT_PORT = GOOGLE_CONFIG["streamlit_port"]
+DATABASE_PATH = GOOGLE_CONFIG["database_path"]
 
 def init_db():
     """Initialize SQLite database for storing user credentials"""
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -67,7 +117,7 @@ def get_oauth_flow():
                 "openid",
                 "https://www.googleapis.com/auth/drive.file",
             ],
-            redirect_uri="http://127.0.0.1:5001/callback"  # OAuth helper port
+            redirect_uri=f"http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/callback"
         )
         return flow
     except Exception as e:
@@ -76,10 +126,10 @@ def get_oauth_flow():
 
 @app.route("/")
 def index():
-    return """
+    return f"""
     <h2>OAuth Helper for Streamlit Google Drive</h2>
     <p>This service handles OAuth callbacks for your Streamlit app.</p>
-    <p>Status: Running on port 5001</p>
+    <p>Status: Running on {OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}</p>
     <p><a href="/start_oauth">Start OAuth Flow</a></p>
     """
 
@@ -137,7 +187,7 @@ def callback():
         
         # Save to database
         init_db()
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("""
             INSERT OR IGNORE INTO users (email, name, picture, access_token, refresh_token) VALUES (?, ?, ?, ?, ?)
@@ -172,7 +222,7 @@ def callback():
         <html>
         <head>
             <title>Authentication Successful</title>
-            <meta http-equiv="refresh" content="3;url=http://localhost:8501">
+            <meta http-equiv="refresh" content="3;url=http://{STREAMLIT_HOST}:{STREAMLIT_PORT}">
             <style>
                 body {{ font-family: Arial, sans-serif; margin: 40px; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }}
                 .container {{ background: rgba(255, 255, 255, 0.1); padding: 30px; border-radius: 15px; box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37); backdrop-filter: blur(4px); border: 1px solid rgba(255, 255, 255, 0.18); }}
@@ -193,7 +243,7 @@ def callback():
                 
                 <div class="spinner"></div>
                 <p class="countdown">Redirecting to Streamlit app in <span id="countdown">3</span> seconds...</p>
-                <p><a href="http://localhost:8501" class="link">Click here if not redirected automatically</a></p>
+                <p><a href="http://{STREAMLIT_HOST}:{STREAMLIT_PORT}" class="link">Click here if not redirected automatically</a></p>
                 <button onclick="window.close()" style="margin-top: 10px; padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 5px; cursor: pointer;">Close This Window</button>
             </div>
             
@@ -241,7 +291,7 @@ def status():
 def clear_users():
     """Clear all users (for testing)"""
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("DELETE FROM users")
         conn.commit()
@@ -252,16 +302,20 @@ def clear_users():
 
 if __name__ == "__main__":
     init_db()
-    print("🚀 OAuth Helper starting on http://127.0.0.1:5001")
+    print(f"🚀 OAuth Helper starting on http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}")
     print("📋 Available endpoints:")
-    print("   - http://127.0.0.1:5001/ (home)")
-    print("   - http://127.0.0.1:5001/start_oauth (start authentication)")
-    print("   - http://127.0.0.1:5001/status (check auth status)")
-    print("   - http://127.0.0.1:5001/clear_users (clear all users)")
+    print(f"   - http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/ (home)")
+    print(f"   - http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/start_oauth (start authentication)")
+    print(f"   - http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/status (check auth status)")
+    print(f"   - http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/clear_users (clear all users)")
     print("")
     print("💡 Instructions:")
     print("   1. Keep this server running")
-    print("   2. Run your Streamlit app: streamlit run app.py")
+    print(f"   2. Run your Streamlit app: streamlit run app.py --server.port {STREAMLIT_PORT}")
     print("   3. Use the authentication button in Streamlit")
     print("")
-    app.run(host="127.0.0.1", port=5001, debug=True)
+    print("📊 Configuration:")
+    print(f"   - Database: {DATABASE_PATH}")
+    print(f"   - Google Client ID: {GOOGLE_CLIENT_ID[:20]}..." if GOOGLE_CLIENT_ID else "   - Google Client ID: Not configured")
+    print("")
+    app.run(host=OAUTH_HELPER_HOST, port=OAUTH_HELPER_PORT, debug=True)

@@ -11,17 +11,67 @@ from google_auth_oauthlib.flow import Flow
 from google.oauth2 import id_token
 import google.auth.transport.requests
 from google.oauth2.credentials import Credentials
+from dotenv import load_dotenv
 
-# Google OAuth configuration
-GOOGLE_CLIENT_ID = "761667959165-08q7o0phqtb66uf7v2mk8sk7n6vuaet4.apps.googleusercontent.com"
-GDRIVE_FOLDER_ID = "1b068Va7q94iVtGEU-h-hfN_VQfBSTsDT"
+# Load environment variables
+load_dotenv()
+
+# Load Google OAuth configuration from client_secret.json and environment
+def load_google_config():
+    """Load Google OAuth configuration from client_secret.json and environment variables"""
+    client_secrets_file = os.path.join(pathlib.Path(__file__).parent, "client_secret.json")
+    
+    # Default values
+    config = {
+        "client_id": None,
+        "client_secret": None,
+        "folder_id": os.getenv("GDRIVE_FOLDER_ID"),
+        "oauth_host": os.getenv("OAUTH_HELPER_HOST", "127.0.0.1"),
+        "oauth_port": int(os.getenv("OAUTH_HELPER_PORT", "5001")),
+        "streamlit_host": os.getenv("STREAMLIT_HOST", "127.0.0.1"),
+        "streamlit_port": int(os.getenv("STREAMLIT_PORT", "8501")),
+        "database_path": os.getenv("DATABASE_PATH", "users.db")
+    }
+    
+    # Load from client_secret.json if available
+    if os.path.exists(client_secrets_file):
+        try:
+            with open(client_secrets_file) as f:
+                client_secrets = json.load(f)
+                if "web" in client_secrets:
+                    config["client_id"] = client_secrets["web"].get("client_id")
+                    config["client_secret"] = client_secrets["web"].get("client_secret")
+                elif "installed" in client_secrets:
+                    config["client_id"] = client_secrets["installed"].get("client_id")
+                    config["client_secret"] = client_secrets["installed"].get("client_secret")
+        except Exception as e:
+            logging.error(f"Error loading client_secret.json: {e}")
+    
+    # Override with environment variables if set
+    if os.getenv("GOOGLE_CLIENT_ID"):
+        config["client_id"] = os.getenv("GOOGLE_CLIENT_ID")
+    if os.getenv("GOOGLE_CLIENT_SECRET"):
+        config["client_secret"] = os.getenv("GOOGLE_CLIENT_SECRET")
+    
+    return config
+
+# Load configuration
+GOOGLE_CONFIG = load_google_config()
+GOOGLE_CLIENT_ID = GOOGLE_CONFIG["client_id"]
+GOOGLE_CLIENT_SECRET = GOOGLE_CONFIG["client_secret"]
+GDRIVE_FOLDER_ID = GOOGLE_CONFIG["folder_id"]
+OAUTH_HELPER_HOST = GOOGLE_CONFIG["oauth_host"]
+OAUTH_HELPER_PORT = GOOGLE_CONFIG["oauth_port"]
+STREAMLIT_HOST = GOOGLE_CONFIG["streamlit_host"]
+STREAMLIT_PORT = GOOGLE_CONFIG["streamlit_port"]
+DATABASE_PATH = GOOGLE_CONFIG["database_path"]
 
 # Force OAuthlib to allow http:// for local dev
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 def init_db():
     """Initialize SQLite database for storing user credentials"""
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -44,6 +94,10 @@ def get_oauth_flow():
         st.error("client_secret.json file not found. Please ensure it's in the same directory as this app.")
         return None
     
+    if not GOOGLE_CLIENT_ID:
+        st.error("Google Client ID not found. Please check your client_secret.json file or environment variables.")
+        return None
+    
     try:
         flow = Flow.from_client_secrets_file(
             client_secrets_file=client_secrets_file,
@@ -53,7 +107,7 @@ def get_oauth_flow():
                 "openid",
                 "https://www.googleapis.com/auth/drive.file",
             ],
-            redirect_uri="http://127.0.0.1:8501/callback"  # Streamlit default port
+            redirect_uri=f"http://{STREAMLIT_HOST}:{STREAMLIT_PORT}/callback"
         )
         return flow
     except Exception as e:
@@ -62,7 +116,7 @@ def get_oauth_flow():
 
 def get_valid_credentials(email: str) -> Optional[Credentials]:
     """Get valid credentials for a user, refreshing if necessary"""
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT access_token, refresh_token FROM users WHERE email=?", (email,))
     row = c.fetchone()
@@ -74,18 +128,13 @@ def get_valid_credentials(email: str) -> Optional[Credentials]:
     access_token, refresh_token = row
 
     try:
-        # Load client secret for refresh
-        client_secrets_file = os.path.join(pathlib.Path(__file__).parent, "client_secret.json")
-        with open(client_secrets_file) as f:
-            client_secret = json.load(f)["web"]["client_secret"]
-
         # Build credentials object
         creds = Credentials(
             token=access_token,
             refresh_token=refresh_token,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=GOOGLE_CLIENT_ID,
-            client_secret=client_secret
+            client_secret=GOOGLE_CLIENT_SECRET
         )
 
         # Refresh if needed
@@ -94,7 +143,7 @@ def get_valid_credentials(email: str) -> Optional[Credentials]:
             creds.refresh(request_session)
 
             # Save new token
-            conn = sqlite3.connect("users.db")
+            conn = sqlite3.connect(DATABASE_PATH)
             c = conn.cursor()
             c.execute("UPDATE users SET access_token=? WHERE email=?", (creds.token, email))
             conn.commit()
@@ -108,6 +157,9 @@ def get_valid_credentials(email: str) -> Optional[Credentials]:
 def upload_image_to_drive(image_bytes: bytes, filename: str, user_email: str) -> Dict:
     """Upload image bytes to Google Drive"""
     try:
+        if not GDRIVE_FOLDER_ID:
+            return {"success": False, "error": "Google Drive folder ID not configured. Please set GDRIVE_FOLDER_ID in .env file."}
+        
         creds = get_valid_credentials(user_email)
         if not creds:
             return {"success": False, "error": "No valid credentials found"}
@@ -144,7 +196,7 @@ def upload_image_to_drive(image_bytes: bytes, filename: str, user_email: str) ->
 
 def get_authenticated_user() -> Optional[str]:
     """Get the email of the authenticated user"""
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT email FROM users ORDER BY id DESC LIMIT 1")
     row = c.fetchone()
@@ -154,7 +206,7 @@ def get_authenticated_user() -> Optional[str]:
 def debug_show_users():
     """Debug function to show all users in database"""
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("SELECT id, email, name, access_token IS NOT NULL as has_token, refresh_token IS NOT NULL as has_refresh FROM users")
         rows = c.fetchall()
@@ -167,7 +219,7 @@ def debug_show_users():
 def check_oauth_helper_status() -> bool:
     """Check if OAuth helper is running"""
     try:
-        response = requests.get("http://127.0.0.1:5001/status", timeout=2)
+        response = requests.get(f"http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/status", timeout=2)
         return response.status_code == 200
     except:
         return False
@@ -175,7 +227,7 @@ def check_oauth_helper_status() -> bool:
 def save_manual_tokens(email: str, access_token: str, refresh_token: Optional[str] = None):
     """Save manually entered tokens to database"""
     try:
-        conn = sqlite3.connect("users.db")
+        conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("""
             INSERT OR IGNORE INTO users (email, name, picture, access_token, refresh_token) VALUES (?, ?, ?, ?, ?)
@@ -189,142 +241,21 @@ def save_manual_tokens(email: str, access_token: str, refresh_token: Optional[st
     except Exception as e:
         logging.error(f"Error saving tokens: {e}")
 
-def handle_streamlit_oauth_callback() -> bool:
-    """Handle OAuth callback from Streamlit query parameters"""
-    try:
-        query_params = st.query_params
-        code = query_params.get("code")
-        state = query_params.get("state")
-        
-        if not code or not state:
-            return False
-        
-        # Check if state matches (if we stored it)
-        stored_state = st.session_state.get("oauth_state")
-        if stored_state and stored_state != state:
-            logging.error("OAuth state mismatch")
-            return False
-        
-        # Exchange code for tokens
-        flow = get_oauth_flow()
-        if not flow:
-            return False
-        
-        # Construct the full callback URL
-        callback_url = f"http://127.0.0.1:8501/callback?code={code}&state={state}"
-        flow.fetch_token(authorization_response=callback_url)
-        
-        credentials = flow.credentials
-        
-        # Get user info
-        user_info_url = f"https://www.googleapis.com/oauth2/v2/userinfo?access_token={credentials.token}"
-        response = requests.get(user_info_url)
-        if response.status_code == 200:
-            id_info = response.json()
-        else:
-            logging.error("Failed to get user info")
-            return False
-        
-        # Save to database
-        conn = sqlite3.connect("users.db")
-        c = conn.cursor()
-        c.execute("""
-            INSERT OR IGNORE INTO users (email, name, picture, access_token, refresh_token) VALUES (?, ?, ?, ?, ?)
-        """, (
-            id_info["email"],
-            id_info.get("name", id_info["email"].split('@')[0]),
-            id_info.get("picture", ""),
-            credentials.token,
-            getattr(credentials, "refresh_token", None)
-        ))
-        c.execute("""
-            UPDATE users SET access_token=?, refresh_token=?, name=?, picture=? WHERE email=?
-        """, (
-            credentials.token,
-            getattr(credentials, "refresh_token", None),
-            id_info.get("name", id_info["email"].split('@')[0]),
-            id_info.get("picture", ""),
-            id_info["email"]
-        ))
-        conn.commit()
-        conn.close()
-        
-        logging.info(f"OAuth callback successful for user: {id_info['email']}")
-        return True
-        
-    except Exception as e:
-        logging.error(f"OAuth callback error: {e}")
-        return False
-
-def handle_manual_oauth_callback(callback_url: str, expected_state: Optional[str] = None) -> bool:
-    """Handle OAuth callback from manually pasted URL"""
-    try:
-        # Parse the URL to extract code and state
-        from urllib.parse import urlparse, parse_qs
-        parsed = urlparse(callback_url)
-        query_params = parse_qs(parsed.query)
-        
-        code = query_params.get("code", [None])[0]
-        state = query_params.get("state", [None])[0]
-        
-        if not code:
-            logging.error("No authorization code in callback URL")
-            return False
-        
-        # Exchange code for tokens
-        flow = get_oauth_flow()
-        if not flow:
-            return False
-        
-        flow.fetch_token(authorization_response=callback_url)
-        credentials = flow.credentials
-        
-        # Get user info
-        user_info_url = f"https://www.googleapis.com/oauth2/v2/userinfo?access_token={credentials.token}"
-        response = requests.get(user_info_url)
-        if response.status_code == 200:
-            id_info = response.json()
-        else:
-            logging.error("Failed to get user info")
-            return False
-        
-        # Save to database
-        conn = sqlite3.connect("users.db")
-        c = conn.cursor()
-        c.execute("""
-            INSERT OR IGNORE INTO users (email, name, picture, access_token, refresh_token) VALUES (?, ?, ?, ?, ?)
-        """, (
-            id_info["email"],
-            id_info.get("name", id_info["email"].split('@')[0]),
-            id_info.get("picture", ""),
-            credentials.token,
-            getattr(credentials, "refresh_token", None)
-        ))
-        c.execute("""
-            UPDATE users SET access_token=?, refresh_token=?, name=?, picture=? WHERE email=?
-        """, (
-            credentials.token,
-            getattr(credentials, "refresh_token", None),
-            id_info.get("name", id_info["email"].split('@')[0]),
-            id_info.get("picture", ""),
-            id_info["email"]
-        ))
-        conn.commit()
-        conn.close()
-        
-        logging.info(f"Manual OAuth callback successful for user: {id_info['email']}")
-        return True
-        
-    except Exception as e:
-        logging.error(f"Manual OAuth callback error: {e}")
-        return False
-
 def display_gdrive_upload_ui(images: List[Dict]):
     """Display Google Drive upload UI in Streamlit"""
     st.subheader("🔗 Upload to Google Drive")
     
     # Initialize database
     init_db()
+    
+    # Check configuration
+    if not GDRIVE_FOLDER_ID:
+        st.error("❌ Google Drive folder ID not configured. Please set GDRIVE_FOLDER_ID in your .env file.")
+        return
+    
+    if not GOOGLE_CLIENT_ID:
+        st.error("❌ Google Client ID not found. Please check your client_secret.json file.")
+        return
     
     # Check if user is authenticated
     user_email = get_authenticated_user()
@@ -343,11 +274,11 @@ def display_gdrive_upload_ui(images: List[Dict]):
             with col1:
                 if st.button("🔐 Authenticate with Google", type="primary"):
                     st.markdown("Click the link below to authenticate:")
-                    st.markdown("[🔗 **Authenticate with Google**](http://127.0.0.1:5001/start_oauth)")
+                    st.markdown(f"[🔗 **Authenticate with Google**](http://{OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}/start_oauth)")
                     st.info("After authentication, refresh this page to see your status.")
             
             with col2:
-                if st.button("� Check Status"):
+                if st.button("🔄 Check Status"):
                     st.rerun()
         else:
             st.warning("⚠️ OAuth Helper is not running")
@@ -380,12 +311,19 @@ def display_gdrive_upload_ui(images: List[Dict]):
                     st.write(f"- ID: {user[0]}, Email: {user[1]}, Name: {user[2]}, Has Token: {user[3]}, Has Refresh: {user[4]}")
             else:
                 st.write("No users found in database")
+            
+            # Show configuration
+            st.write("Configuration:")
+            st.write(f"- Database: {DATABASE_PATH}")
+            st.write(f"- OAuth Helper: {OAUTH_HELPER_HOST}:{OAUTH_HELPER_PORT}")
+            st.write(f"- Google Drive Folder ID: {GDRIVE_FOLDER_ID}")
+            st.write(f"- Google Client ID: {GOOGLE_CLIENT_ID[:20]}..." if GOOGLE_CLIENT_ID else "- Google Client ID: Not configured")
         
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🔄 Logout"):
                 # Clear user from database
-                conn = sqlite3.connect("users.db")
+                conn = sqlite3.connect(DATABASE_PATH)
                 c = conn.cursor()
                 c.execute("DELETE FROM users WHERE email=?", (user_email,))
                 conn.commit()
@@ -394,7 +332,7 @@ def display_gdrive_upload_ui(images: List[Dict]):
         
         with col2:
             if st.button("🧹 Clear All Users"):
-                conn = sqlite3.connect("users.db")
+                conn = sqlite3.connect(DATABASE_PATH)
                 c = conn.cursor()
                 c.execute("DELETE FROM users")
                 conn.commit()
@@ -434,50 +372,3 @@ def display_gdrive_upload_ui(images: List[Dict]):
             time.sleep(2)
             progress_bar.empty()
             status_text.empty()
-
-def handle_oauth_callback(authorization_response: str, state: str):
-    """Handle OAuth callback (for manual implementation if needed)"""
-    try:
-        flow = get_oauth_flow()
-        if not flow:
-            return False
-        
-        flow.fetch_token(authorization_response=authorization_response)
-        
-        credentials = flow.credentials
-        
-        # Get user info using the access token
-        user_info_url = f"https://www.googleapis.com/oauth2/v2/userinfo?access_token={credentials.token}"
-        response = requests.get(user_info_url)
-        if response.status_code == 200:
-            id_info = response.json()
-        else:
-            logging.error("Failed to get user info")
-            return False
-
-        # Save user + tokens
-        conn = sqlite3.connect("users.db")
-        c = conn.cursor()
-        c.execute("""
-            INSERT OR IGNORE INTO users (email, name, picture, access_token, refresh_token) VALUES (?, ?, ?, ?, ?)
-        """, (
-            id_info["email"],
-            id_info.get("name"),
-            id_info.get("picture"),
-            credentials.token,
-            getattr(credentials, "refresh_token", None)
-        ))
-        c.execute("""
-            UPDATE users SET access_token=?, refresh_token=? WHERE email=?
-        """, (
-            credentials.token,
-            getattr(credentials, "refresh_token", None),
-            id_info["email"]
-        ))
-        conn.commit()
-        conn.close()
-        
-        return True
-    except Exception as e:
-        logging.error(f"OAuth callback error: {e}")
-        return False

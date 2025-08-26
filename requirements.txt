@@ -1,9 +1,10 @@
 streamlit>=1.36
 openai>=1.30.0
 pillow>=10.3.0
-dotenv>=1.0.0
+python-dotenv>=1.0.0
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 PyDrive
 flask
+requests
